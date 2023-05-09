@@ -1,30 +1,2107 @@
----
-title: "Bicuspid_Project"
-author: "U Bhalraam"
-date: "`r Sys.Date()`"
-output: html_document
----
+```{r Ensure Folders Exist, eval=FALSE, include=FALSE}
+Folders_Req <- c("Data", "TableOne", "Rate_of_Increase_Plots", "UV_Tables", "MV_Tables", "CumHaz_Plots_Time", "CumHaz_Plots", "PS_CumHaz_Plots")
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+for (i in 1:length(Folders_Req)) {
+
+if (!dir.exists(paste0(Folders_Req[i]))){
+  dir.create(paste0(Folders_Req[i]))
+}else{
+  print(paste0(Folders_Req[i], " exists"))
+}
+}
+
 ```
 
-## R Markdown
+```{r Importing Libraries}
+library(tidyverse)
+library(readxl)
+library(naniar)
+library(lubridate)
+library(gtsummary)
+library(survival)
+library(doParallel)
+library(gt)
+library(openxlsx)
+library(rstatix)
+library(ggpubr)
+library(writexl)
+library(survminer)
+library(foreach)
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+theme_gtsummary_journal(journal = "jama")
+#> Setting theme `JAMA`
+theme_gtsummary_compact()
+#> Setting theme `Compact`
 ```
 
-## Including Plots
+```{r Importing Data}
+S_Data <- read_excel("Data/Spreadsheet April 17th.xlsx") %>% rename(ID = "Unique Study ID Number")
+S_Deaths <- read_excel("Data/Copy of Final Spreadsheet March 3_vv.xlsx", sheet = "Deaths") %>% rename(ID = "Unique Study ID Number")
+S_Deaths2 <- read_excel("Data/Deaths spreadsheet.xlsx") %>% rename(ID = "Unique Study ID Number") %>% select(`Date of death`, ID)
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+Study_End <- as.POSIXct("22/12/2022", tz = "UTC", format = "%d/%m/%Y")
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r Column Handling}
+S_Combined <- left_join(S_Data, S_Deaths, by = "ID")
+S_Combined <- left_join(S_Combined, S_Deaths2, by = "ID")
+
+Combined <- S_Combined %>%
+  transmute(ID = as.numeric(ID),
+            DOB = as.POSIXct(DOB),
+            Age_FU = as.numeric(`Age at end-point or most recent FU.x`),
+            Age_Diagnosis = as.numeric(`Age at Diagnosis`),
+            Age_Intervention_AVR = as.numeric(`Age at intervention`),
+            Gender = factor(`Gender (1=male,2=female).x`, levels = 1:2, labels = c("Male", "Female")),
+            Ethnicity = factor(`Ethnicity (1=White,2=Asian,3=Black,4=Other).x`, levels = 1:4, labels = c("White", "Asian", "Black", "Other")),
+            How_Diagnosed = factor(`How Diagnosed (1=Cardiac symptoms;2=Adverse CV event;3=Screening;4=Examination findings,5=Other)`, levels = 1:5, labels = c("Cardiac Symptoms", "Adverse Cardiovascular Event", "Screening", "Examination FIndings", "Other")),
+            Outcomes_Standardised = factor(`Outcomes Standardized (1=Aneurysm,2=Dissection,3=Endocarditis,4=Cardiac Arrest)`, levels = 1:4, labels = c("Aneurysm", "Dissection", "Endocarditis", "Cardiac Arrest")),
+            Dead = factor(`RIP? (1=yes,0=no).x`, levels = 0:1, labels = c("No", "Yes")),
+            Coarctation = factor(`Coarctation  (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+            Hypertension = factor(`Hypertension  (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+            AF = factor(`AF (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+            IHD = factor(`IHD (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+            T2DM = factor(`T2DM (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+            Hyperlipidaemia = factor(`Hyperlipidaemia (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+            CVA = factor(`CVA (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+            DCM = factor(`DCM (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+            PPM = factor(`PPM (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+            FHx_FDRwBAV = factor(`Family History (FDR with BAV) (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+            CMR_BIN = factor(`CMR PERFORMED? (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+            AVR_BIN = factor(`AVR  (1=yes,0=no).x`, levels = 0:1, labels = c("No", "Yes")),
+            Surgery_AVR = factor(`Standardized surgery (1=AVR, 2=AVR+Ao Replacement, 3=Ao replacement/repair, 4=Other (transplant/valvuloplasty etc)`, levels = 1:4, labels = c("AVR", "AVR+Ao Replacement", "Ao Replacement/Repair", "Other(transplant/valvuloplasty")),
+            
+            AVR_Date = as.numeric(case_when(`Date of AVR` == "1.5.18" ~ "43221",
+                                            `Date of AVR` == "12.1.18" ~ "43112",
+                                            `Date of AVR` == "18.10.17" ~ "43026",
+                                            `Date of AVR` == "30.2.17" ~ "42765",
+                                  TRUE ~ `Date of AVR`)),
+            
+            AVR_Date = convertToDateTime(AVR_Date, tz = "London/Europe"),
+          AVR_Indication = factor(`Indication (1=Aortic dilataton,2=aortic dilatation (+AS),3=aortic dilatation(+AR),4=aortic dissection,5=AR + aortic dilatation,6=AR,7=AS,8=AS+dilatation,9=AS+AR (mixed),10=Endocarditis,11=transplant)`, levels = 1:11, labels = c("Aortic Dilatation", "Aortic Dilatation & Aortic Stenosis", "Aortic Dilatation and Aortic Regurgitation", "Aortic Dissection", "Aortic Dilatation and Aortic Regurgitation", "Aortic Regurgitation", "Aortic Stenosis", "Aortic Dilatation & Aortic Stenosis", "Aortic Stenosis & Aortic Regurgitation", "Endocarditis", "Transplant")),
+          AVR_Indication_Dilatation = factor(
+                                           case_when(
+                                           str_detect(AVR_Indication, "Dilatation") == FALSE ~ 0,
+                                           str_detect(AVR_Indication, "Dilatation") == TRUE ~ 1), levels = 0:1, labels = c("No Aortic Dilatation", "Aortic Dilatation")),
+          
+          AVR_Indication_Stenosis = factor(
+                                           case_when(str_detect(AVR_Indication, "Stenosis") == FALSE ~ 0,
+                                           str_detect(AVR_Indication, "Stenosis") ~ 1), levels = 0:1, labels = c("No Aortic Stenosis", "Aortic Stenosis")),
+          
+          AVR_Indication_Regurgitation = factor(
+                                           case_when(str_detect(AVR_Indication, "Regurgitation") == FALSE ~ 0,
+                                           str_detect(AVR_Indication, "Regurgitation") ~ 1), levels = 0:1, labels = c("No Aortic Regurgitation", "Aortic Regurgitation")),
+          
+          AVR_Indication_Dissection = factor(
+                                           case_when(str_detect(AVR_Indication, "Dissection") == FALSE ~ 0,
+                                           str_detect(AVR_Indication, "Dissection") ~ 1), levels = 0:1, labels = c("No Dissection", "Dissection")),
+          
+          AVR_Indication_Endocarditis = factor(
+                                           case_when(str_detect(AVR_Indication, "Endocarditis") == FALSE ~ 0,
+                                           str_detect(AVR_Indication, "Endocarditis") ~ 1), levels = 0:1, labels = c("No Endocarditis", "Endocarditis")),
+          
+          AVR_Indication_Transplant = factor(
+                                           case_when(str_detect(AVR_Indication, "Transplant") == FALSE ~ 0,
+                                           str_detect(AVR_Indication, "Transplant") ~ 1), levels = 0:1, labels = c("No Transplant", "Transplant")),
+          BAV_Morphology = factor(`BAV Morphology (type of fusion) (1=RL,2=RN,3=LN,4=Type 0)`, levels = 1:4, labels = c("RL", "RN", "LN", "Type 0")),
+          Height = as.numeric(`Height (m)`),
+          Weight = as.numeric(`Weight (kg)`),
+          BMI = as.numeric(Weight/(Height^2)),
+          Initial_Interaction_forsurgery = factor(`Initial interaction at SGH specifically for surgery?`, levels = 0:1, labels = c("No", "Yes")),
+          Echo_1_Date = as.numeric(case_when(`Echo 1 Date` == "NO PRE-OP ECHO REPORT" ~ NA_character_,
+                                             `Echo 1 Date` == "11.4.18" ~ "43201",
+                                             `Echo 1 Date` == "11.9.19" ~ "43719",
+                                             `Echo 1 Date` == "13.2.20" ~ "43874",
+                                             `Echo 1 Date` == "16.2.18" ~ "43147",
+                                             `Echo 1 Date` == "31.7.20" ~ "44043",
+                                             
+                                  TRUE ~ `Echo 1 Date`)),
+          Echo_1_Date = convertToDateTime(Echo_1_Date, tz = "London/Europe"),
+          Echo_1_Age = interval(DOB, Echo_1_Date) %/% years(1),
+          Echo_2_Date = as.numeric(case_when(`Echo 2 Date` == "7.2.16" ~ "42407",
+                                  TRUE ~ `Echo 2 Date`)),
+          Echo_2_Date = convertToDateTime(`Echo 2 Date`, tz = "London/Europe"),
+          Echo_3_Date = as.numeric(case_when(`Echo 3 Date` == "11.1.22" ~ "44572",
+                                             `Echo 3 Date` == "11.9.20" ~ "44085",
+                                             `Echo 3 Date` == "23.2.21" ~ "44250",
+                                             `Echo 3 Date` == "25.10.21" ~ "44494",
+                                             `Echo 3 Date` == "AVR" ~ NA_character_,
+                                  TRUE ~ `Echo 3 Date`)),
+          Echo_3_Date = convertToDateTime(Echo_3_Date, tz = "London/Europe"),
+          Echo2_1 = as.numeric(difftime(Echo_2_Date, Echo_1_Date, "days")), 
+          Echo3_2 = as.numeric(difftime(Echo_3_Date, Echo_2_Date, "days")),
+          Echo_Check = ifelse(is.na(Echo_2_Date) & !is.na(Echo_3_Date), 1,0) ,
+          Echo_1a = 0,
+          Echo_2a = Echo_1a + Echo2_1,
+          Echo_3a = Echo_2a + Echo3_2,
+         
+          Earliest_Echo = pmin(Echo_1_Date, Echo_2_Date, Echo_3_Date, na.rm = T),
+          
+          SOV_1 = as.numeric(`SOV 1`),
+          SOV_2 = as.numeric(`SOV 2`),
+          SOV_3 = as.numeric(`SOV 3`),
+          Max_SOV = pmax(SOV_1, SOV_2, SOV_3, na.rm = T),
+          STJ_1 = as.numeric(`STJ 1`),
+          STJ_2 = as.numeric(`STJ 2`),
+          STJ_3 = as.numeric(`STJ 3`),
+          Max_STJ = pmax(STJ_1, STJ_2, STJ_3, na.rm = T),
+          AA_1 = as.numeric(`AA 1`),
+          AA_2 = as.numeric(`AA 2`),
+          AA_3 = as.numeric(`AA 3`),
+          Max_AA = pmax(AA_1, AA_2, AA_3, na.rm = T),
+          Severe_AoDilatation = fct_explicit_na(factor(
+            if_else(SOV_1 > 50 | SOV_2 > 50 | SOV_2 > 50 | STJ_1 > 50 | STJ_2 > 50 | STJ_3 > 50 | AA_1 > 50 | AA_2 > 50 | AA_3 > 50, 1, 0), levels = 0:1, labels = c("No Severe AoDilatation", "Severe AoDilatation")), "No Severe AoDilatation"),
+          Earliest_Echo_AoDilatation = case_when(
+                                       SOV_3 > 50 | STJ_3 > 50 | AA_3 > 50 ~ Echo_3_Date,
+                                       SOV_2 > 50 | STJ_2 > 50 | AA_2 > 50 ~ Echo_2_Date,
+                                       SOV_1 > 50 | STJ_1 > 50 | AA_1 > 50 ~ Echo_1_Date,
+                                      TRUE ~ NA_POSIXct_),
+         
+         
+          LVEDD_1 = as.numeric(`LVEDD 1`),
+          LVEDD_2 = as.numeric(`LVEDD 2`),
+          LVEDD_3 = as.numeric(`LVEDD 3`),
+          Max_LVEDD = pmax(LVEDD_1, LVEDD_2, LVEDD_3, na.rm = T),
+          LVESD_1 = as.numeric(`LVESD 1`),
+          LVESD_2 = as.numeric(`LVESD 2`),
+          LVESD_3 = as.numeric(`LVESD 3`),
+          Max_LVESD = pmax(LVESD_1, LVESD_2, LVESD_3, na.rm = T),
+          LV_Septum_1 = as.numeric(`LV Septum 1`),
+          LV_Septum_2 = as.numeric(`LV Septum 2`),
+          LV_Septum_3 = as.numeric(`LV Septum 3`),
+          Max_LV_Septum = pmax(LV_Septum_1, LV_Septum_2, LV_Septum_3, na.rm = T),
+          LVEF_1 = as.numeric(`LVEF 1`),
+          LVEF_2 = as.numeric(`LVEF 2`),
+          LVEF_3 = as.numeric(`LVEF 3`),
+          Max_LV_Septum = pmin(LVEF_1, LVEF_2, LVEF_3, na.rm = T),
+          AR_Severity_1 = factor(`AR Severity 1 (1=Nil,2=Trivial,3=Mild,4=Mild-moderate,5=Moderate,6=Moderate-Severe,7=Severe,8=AVR)`, levels = 1:7, labels = c("Nil", "Trivial", "Mild", "Mild-Moderate", "Moderate", "Moderate-Severe", "Severe")),
+          AR_Severity_2 = factor(`AR Severity 2  (1=Nil,2=Trivial,3=Mild,4=Mild-moderate,5=Moderate,6=Moderate-Severe,7=Severe,8=AVR)`, levels = 1:7, labels = c("Nil", "Trivial", "Mild", "Mild-Moderate", "Moderate", "Moderate-Severe", "Severe")),
+          AR_Severity_3 = factor(`AR Severity 3  (1=Nil,2=Trivial,3=Mild,4=Mild-moderate,5=Moderate,6=Moderate-Severe,7=Severe,8=AVR)`, levels = 1:7, labels = c("Nil", "Trivial", "Mild", "Mild-Moderate", "Moderate", "Moderate-Severe", "Severe")),
+         Severe_AR = fct_explicit_na(factor(if_else(AR_Severity_1 == "Severe" | AR_Severity_2 == "Severe"| AR_Severity_3 == "Severe", 1, 0), levels = 0:1, labels = c("No Severe AR", "Severe AR")), "No Severe AR"),
+         Earliest_Echo_AR = case_when(AR_Severity_3 == "Severe" ~ Echo_3_Date,
+                                      AR_Severity_2 == "Severe" ~ Echo_2_Date,
+                                      AR_Severity_1 == "Severe" ~ Echo_1_Date,
+                                      TRUE ~ NA_POSIXct_),
+          AS_Severity_1 = factor(`AS Severity 1  (1=Nil,2=Trivial,3=Mild,4=Mild-moderate,5=Moderate,6=Moderate-Severe,7=Severe,8=AVR)`, levels = 1:7, labels = c("Nil", "Trivial", "Mild", "Mild-Moderate", "Moderate", "Moderate-Severe", "Severe")),
+          AS_Severity_2 = factor(`AS Severity 2  (1=Nil,2=Trivial,3=Mild,4=Mild-moderate,5=Moderate,6=Moderate-Severe,7=Severe,8=AVR)`, levels = 1:7, labels = c("Nil", "Trivial", "Mild", "Mild-Moderate", "Moderate", "Moderate-Severe", "Severe")),
+          AS_Severity_3 = factor(`AS Severity 3  (1=Nil,2=Trivial,3=Mild,4=Mild-moderate,5=Moderate,6=Moderate-Severe,7=Severe,8=AVR)`, levels = 1:7, labels = c("Nil", "Trivial", "Mild", "Mild-Moderate", "Moderate", "Moderate-Severe", "Severe")),
+         Severe_AS = fct_explicit_na(factor(if_else(AS_Severity_1 == "Severe" | AS_Severity_2 == "Severe"| AS_Severity_3 == "Severe", 1, 0), levels = 0:1, labels = c("No Severe AS", "Severe AS")), "No Severe AS"),
+         Earliest_Echo_AS = case_when(AS_Severity_3 == "Severe" ~ Echo_3_Date,
+                                      AS_Severity_2 == "Severe" ~ Echo_2_Date,
+                                      AS_Severity_1 == "Severe" ~ Echo_1_Date,
+                                      TRUE ~ NA_POSIXct_),
+          AV_Peak_Velocity_1 = as.numeric(`AV Peak Velocity 1`),
+          AV_Peak_Velocity_2 = as.numeric(`AV Peak Velocity 2`),
+          AV_Peak_Velocity_3 = as.numeric(`AV Peak Velocity 3`),
+          AV_Mean_Velocity_1 = as.numeric(`AV Mean Velocity 1`),
+          AV_Mean_Velocity_2 = as.numeric(`AV Mean Velocity 2`),
+          AV_Mean_Velocity_3 = as.numeric(`AV Mean Velocity 3`),
+          LVOT_Peak_Velocity_1 = as.numeric(`LVOT Peak Velocity 1`),
+          LVOT_Peak_Velocity_2 = as.numeric(`LVOT Peak Velocity 2`),
+          LVOT_Peak_Velocity_3 = as.numeric(`LVOT Peak Velocity 3`),
+          LVOT_Mean_Velocity_1 = as.numeric(`LVOT Mean Velocity 1`),
+          LVOT_Mean_Velocity_2 = as.numeric(`LVOT Mean Velocity 2`),
+          LVOT_Mean_Velocity_3 = as.numeric(`LVOT Mean Velocity 3`),
+          LVOT_Diameter_1 = as.numeric(`LVOT Diameter 1`),
+          LVOT_Diameter_2 = as.numeric(`LVOT Diameter 2`),
+          LVOT_Diameter_3 = as.numeric(`LVOT Diameter 3`),
+          Average_Met_Min_Week = as.numeric(`Average met-min/week in lifetime`),
+          Elite_Athlete = factor(`Elite Athlete? (1=yes,0=no)`, levels = 0:1, labels = c("No", "Yes")),
+          Exercise_Group = factor(`Exercise group (1=sedentary/lightly active,2=moderately active, 3=highly active)`, levels = 1:3, labels = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active")),
+         Exercise_Group_Seden_BIN = fct_collapse(factor(`Exercise group (1=sedentary/lightly active,2=moderately active, 3=highly active)`, levels = 1:3, labels = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active")), "Not Sedentary/Lightly Active" = c("Moderately Active", "Highly Active")),
+          Mortality = factor(`RIP? (1=yes,0=no).x`, levels = 0:1, labels = c("Alive", "Dead")),
+          Mortality_NUM = as.numeric(`RIP? (1=yes,0=no).x`),
+          Date_Death = as.POSIXct(`Date of death`),
+         
+          Mortality_FU_Dates = if_else(Mortality != "Alive", Date_Death, Study_End),
+          Mortality_FU_Time = interval(Earliest_Echo, Mortality_FU_Dates) %/% days(1),
+          Mortality_FU_Age = interval(DOB, Mortality_FU_Dates) %/% years(1),
+         
+          CV_1 = case_when(`cardiac_1_-notcardiac0_unknown2` == 1 ~ 1,
+                           TRUE ~ 0),
+          CV_Mortality = factor(CV_1, levels = 0:1, labels = c("Non-CV-Death", "CV-Death")),
+         
+          AVR_FU_Dates = if_else(AVR_BIN == "No", Study_End, AVR_Date),
+          AVR_FU_Time = interval(Earliest_Echo, AVR_FU_Dates) %/% days(1),
+          AVR_FU_Age = interval(DOB, AVR_FU_Dates) %/% years(1),
+         
+          Severe_AS_FU_Dates = if_else(Severe_AS != "No Severe AS", Earliest_Echo_AS, Study_End),
+          Severe_AS_FU_Time = interval(Earliest_Echo, Severe_AS_FU_Dates) %/% days(1),
+          Severe_AS_FU_Age = interval(DOB, Severe_AS_FU_Dates) %/% years(1),
+         
+          Severe_AR_FU_Dates = if_else(Severe_AR != "No Severe AR", Earliest_Echo_AR, Study_End),
+          Severe_AR_FU_Time = interval(Earliest_Echo, Severe_AR_FU_Dates) %/% days(1),
+          Severe_AR_FU_Age = interval(DOB, Severe_AR_FU_Dates) %/% years(1),
+         
+          Severe_AoDilatation_FU_Dates = if_else(Severe_AoDilatation != "No Severe AoDilatation", Earliest_Echo_AoDilatation, Study_End),
+          Severe_AoDilatation_FU_Time = interval(Earliest_Echo, Severe_AoDilatation_FU_Dates) %/% days(1),
+         Severe_AoDilatation_FU_Age = interval(DOB, Severe_AoDilatation_FU_Dates) %/% years(1),
+         
+          Composite_BIN_wMort = case_when(Mortality == "Dead" ~ 1,
+                                    AVR_BIN == "Yes" ~ 1,
+                                    Severe_AS == "Severe AS" ~ 1,
+                                    Severe_AR == "Severe AR" ~ 1,
+                                    Severe_AoDilatation == "Severe AoDilatation" ~ 1,
+                                    TRUE ~ 0),
+          Composite_wMort_FU_Time = pmin(AVR_FU_Time, Severe_AS_FU_Time, Severe_AR_FU_Time, Severe_AoDilatation_FU_Time),
+         Composite_wMort_FU_Dates = as_date(Echo_1_Date) + ddays(Composite_wMort_FU_Time),
+         Composite_wMort_FU_Age = interval(DOB, Composite_wMort_FU_Dates) %/% years(1),
+         
+          Composite_BIN_woMort = case_when(
+                                    AVR_BIN == "Yes" ~ 1,
+                                    Severe_AS == "Severe AS" ~ 1,
+                                    Severe_AR == "Severe AR" ~ 1,
+                                    Severe_AoDilatation == "Severe AoDilatation" ~ 1,
+                                    TRUE ~ 0),
+          Composite_woMort_FU_Time = pmin(AVR_FU_Time, Severe_AS_FU_Time, Severe_AR_FU_Time, Severe_AoDilatation_FU_Time),
+         Composite_woMort_FU_Dates = as_date(Echo_1_Date) + ddays(Composite_woMort_FU_Time),
+         Composite_woMort_FU_Age = interval(DOB, Composite_woMort_FU_Dates) %/% years(1)
+         
+
+          
+  )
+  
+Combined_C <- Combined %>%
+  filter(AVR_FU_Time > -1) %>%
+  select(ID, Age_Diagnosis, Age_Intervention_AVR, Gender, Ethnicity, Height, Weight, BMI, How_Diagnosed, BAV_Morphology, Initial_Interaction_forsurgery, Outcomes_Standardised, Coarctation, Hypertension, AF, IHD, T2DM, Hyperlipidaemia, CVA, DCM, PPM, FHx_FDRwBAV, CMR_BIN, Echo_1_Age, Echo_1_Date, Echo_2_Date, Echo_3_Date, Echo_1a, Echo_2a, Echo_3a, starts_with("SOV"), Max_SOV, starts_with("STJ"), Max_STJ, starts_with("AA"), Max_AA, starts_with("LVEDD"), starts_with("LVESD"), starts_with("LV_Septum"), starts_with("LVEF"), starts_with("AR_Severity"), starts_with("AS_Severity"), starts_with("AV_"), starts_with("LVOT"), starts_with("Average_"), Elite_Athlete, Exercise_Group, Exercise_Group_Seden_BIN, Mortality, Date_Death, Mortality_FU_Time, Mortality_FU_Age, AVR_BIN, AVR_Date, AVR_FU_Time, AVR_FU_Age, Surgery_AVR, AVR_Indication, Severe_AS, Severe_AS_FU_Time, Severe_AS_FU_Age, Severe_AR, Severe_AR_FU_Time, Severe_AR_FU_Age, Severe_AoDilatation, Severe_AoDilatation_FU_Time, Severe_AoDilatation_FU_Age,Composite_BIN_wMort, Composite_wMort_FU_Time, Composite_wMort_FU_Age, Composite_BIN_woMort, Composite_woMort_FU_Time, Composite_woMort_FU_Age)
+```
+
+```{r Normality Testing}
+#NumVar <- Combined_C %>%
+#  select(where(is.numeric)) %>%
+ # names() %>%
+ # syms()
+
+#Shapiro_Test <- Combined_C %>%
+#  shapiro_test(vars = NumVar) 
+
+#NormallyDistVars <- Shapiro_Test %>%
+ # filter(p >= 0.05) %>%
+ # pull(variable)
+
+#NonNormallyDistVars <- Shapiro_Test %>%
+#  filter(p < 0.05) %>%
+ # pull(variable)
+
+#non_normal_densityplots <- Combined_C %>%
+ # ggdensity(NonNormallyDistVars, fill = "lightgray") 
+
+#non_normal_qqplots <- Combined_C %>%
+  #ggqqplot(NonNormallyDistVars)   
+
+#ggexport(plotlist = non_normal_densityplots, filename = "Normality_Testing/density.pdf",
+  #       nrow = 2, ncol = 2)
+
+#ggexport(plotlist = non_normal_qqplots, filename = "Normality_Testing/qq.pdf",
+  #       nrow = 2, ncol = 2)
+
+NormallyDistVars <-  c("Height", "Age_Intervention_AVR", "SOV_1", "SOV_2", "SOV_3", "Max_SOV", "AA_1", "AA_2", "AA_3", "Max_AA", "LVEDD_1", "LVEDD_2", "LVEDD_3", "LVOT_Diameter_1", "LVOT_Diameter_2", "LVOT_Diameter_3", "LVOT_Mean_Velocity_1", "LVOT_Mean_Velocity_2", "LVOT_Mean_Velocity_3")
+```
+
+```{r By Exercise Group}
+A <- c("Age_FU", "Age_Diagnosis", "Gender", "Ethnicity", "Height", "Weight", "BMI", "How_Diagnosed", "BAV_Morphology", "Outcomes_Standardised", "Initial_Interaction_forsurgery")
+B <- c("Hypertension", "AF", "IHD", "T2DM", "Hyperlipidaemia", "CVA", "DCM", "PPM", "Coarctation", "FHx_FDRwBAV")
+C <- c("AVR_BIN", "Age_Intervention_AVR", "Surgery_AVR", "AVR_Date", "AVR_Indication", "AVR_Indication_Dilatation", "AVR_Indication_Stenosis", "AVR_Indication_Regurgitation", "AVR_Indication_Dissection", "AVR_Indication_Endocarditis", "AVR_Indication_Transplant")
+D <- c("SOV_1", "SOV_2", "SOV_3", "Max_SOV", "STJ_1", "STJ_2", "STJ_3", "Max_STJ", "AA_1", "AA_2", "AA_3", "Max_AA", "LVEDD_1", "LVEDD_2", "LVEDD_3", "LVESD_1", "LVESD_2", "LVESD_3", "LV_Septum_1", "LV_Septum_2", "LV_Septum_3", "LVEF_1", "LVEF_2", "LVEF_3")
+E <- c("AR_Severity_1", "AR_Severity_2", "AR_Severity_3", "AS_Severity_1", "AS_Severity_2", "AS_Severity_3", "AV_Peak_Velocity_1", "AV_Peak_Velocity_2", "AV_Peak_Velocity_3", "AV_Mean_Velocity_1", "AV_Mean_Velocity_2", "AV_Mean_Velocity_3", "LVOT_Peak_Velocity_1", "LVOT_Peak_Velocity_2", "LVOT_Peak_Velocity_3", "LVOT_Mean_Velocity_1", "LVOT_Mean_Velocity_2", "LVOT_Mean_Velocity_3", "LVOT_Diameter_1", "LVOT_Diameter_2", "LVOT_Diameter_3")
+F <- c("Average_Met_Min_Week", "Elite_Athlete", "Exercise_Group")
+G <- c("CV_Mortality", "Mortality", "Mortality_FU_Time", "Mortality_FU_Age", "AVR_BIN", "AVR_FU_Time", "AVR_FU_Age", "Severe_AS", "Severe_AS_FU_Time", "Severe_AS_FU_Age", "Severe_AR", "Severe_AR_FU_Time", "Severe_AR_FU_Age", "Severe_AoDilatation", "Severe_AoDilatation_FU_Time", "Severe_AoDilatation_FU_Age", "Composite_BIN_wMort", "Composite_wMort_FU_Time", "Composite_wMort_FU_Age", "Composite_BIN_woMort", "Composite_woMort_FU_Time", "Composite_woMort_FU_Age")
+
+NormA <- intersect(A, NormallyDistVars)
+NormB <- intersect(B, NormallyDistVars)
+NormC <- intersect(C, NormallyDistVars)
+NormD <- intersect(D, NormallyDistVars)
+NormE <- intersect(E, NormallyDistVars)
+NormF <- intersect(F, NormallyDistVars)
+NormG <- intersect(G, NormallyDistVars)
+
+Part <- c("A", "B", "C", "D", "E", "F", "G")
+NormPart <- c("NormA", "NormB", "NormC", "NormD", "NormE", "NormF", "NormG")
+
+TableOne_A <- tbl_summary(Combined,
+                        by = "Exercise_Group",
+                        missing = "no",
+                        statistic = list(all_of(NormA) ~ "{mean} ({sd})"),
+                        include = all_of(A),
+                        label = list(Age_FU ~ "Age at first Echocardiography",
+                                     Age_Diagnosis ~ "Age at time of BAV Diagnosis",
+                                     Gender ~ "Sex",
+                                     Ethnicity ~ "Ethnicity",
+                                     Height ~ "Height",
+                                     Weight ~ "Weight",
+                                     BMI ~ "BMI (kg/m2)",
+                                     How_Diagnosed ~ "How BAV was diagnosed",
+                                     BAV_Morphology ~ "Morphology of BAV",
+                                     Outcomes_Standardised ~ "Outcomes Standardised",
+                                     Initial_Interaction_forsurgery ~ "Initial Interaction was for surgery?" )) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+TableOne_B <- tbl_summary(Combined,
+                        by = "Exercise_Group",
+                        missing = "no",
+                        statistic = list(all_of(NormB) ~ "{mean} ({sd})"),
+                        include = all_of(B),
+                        label = list(Hypertension ~ "Hypertension",
+                                     AF ~ "Atrial Fibrillation",
+                                     IHD ~ "Ischaemic Heart Disease",
+                                     T2DM ~ "Type 2 Diabetes Mellitus",
+                                     Hyperlipidaemia ~ "Hyperlipidaemia",
+                                     CVA ~ "Cerebrovascular Event",
+                                     DCM ~ "Dilated Cardiomyopathy",
+                                     PPM ~ "Permanant Pacemaker",
+                                     Coarctation ~ "Aortic Coarctation",
+                                     FHx_FDRwBAV ~ "Family History of Bicuspid Aortic Valve")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_C <- tbl_summary(Combined,
+                        by = "Exercise_Group",
+                        missing = "no",
+                        statistic = list(all_of(NormC) ~ "{mean} ({sd})"),
+                        include = all_of(C),
+                        label = list(AVR_BIN ~ "Aortic Valve Repair/Replacement", 
+                                     Age_Intervention_AVR ~ "Age at AVR", 
+                                     Surgery_AVR ~ "Type of AVR", 
+                                     AVR_Date ~ "Date of AVR")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+TableOne_D <- tbl_summary(Combined,
+                        by = "Exercise_Group",
+                        missing = "no",
+                        statistic = list(all_of(NormD) ~ "{mean} ({sd})"),
+                        include = all_of(D)) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_E <- tbl_summary(Combined,
+                        by = "Exercise_Group",
+                        missing = "no",
+                        statistic = list(all_of(NormE) ~ "{mean} ({sd})"),
+                        include = all_of(E)) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(simulate.p.value = T)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_F <- tbl_summary(Combined,
+                        by = "Exercise_Group",
+                        missing = "no",
+                        statistic = list(all_of(NormF) ~ "{mean} ({sd})"),
+                        include = all_of(F),
+                        label = list(Average_Met_Min_Week ~ "Average Metabolic Minutes a Week",
+                                     Elite_Athlete ~ "Elite Athelete")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_G <- tbl_summary(Combined,
+                        by = "Exercise_Group",
+                        missing = "no",
+                        statistic = list(all_of(NormG) ~ "{mean} ({sd})"),
+                        include = all_of(G),
+                        label = list(CV_Mortality ~ "Cardiovascular Mortality",
+                                     Mortality ~ "Mortality", 
+                                     Mortality_FU_Time ~ "Mortality Followup Time", 
+                                     Mortality_FU_Age ~ "Mortality Followup Age",
+                                     AVR_BIN~ "Aortic Valve Repair/Replacement", 
+                                     AVR_FU_Time~ "Aortic Valve Repair/Replacement Followup Time",
+                                     AVR_FU_Age~ "Aortic Valve Repair/Replacement Followup Age", 
+                                     Severe_AS~ "Severe Aortic Stenosis", 
+                                     Severe_AS_FU_Time~ "ASevere Aortic Stenosis Followup Time",
+                                     Severe_AS_FU_Age~ "ASevere Aortic Stenosis Followup Age",
+                                     Severe_AR~ "Severe Aortic Regurgitation ", 
+                                     Severe_AR_FU_Time~ "Severe Aortic Regurgitation Followup Time",
+                                     Severe_AR_FU_Age~ "Severe Aortic Regurgitation Followup Age",
+                                     Severe_AoDilatation~ "Severe Aortic Dilatation",
+                                     Severe_AoDilatation_FU_Time~ "Aortic Dilatation Followup Time",
+                                     Severe_AoDilatation_FU_Age~ "Aortic Dilatation Followup Age",
+                                     Composite_BIN_wMort~ "Composite End-point",
+                                     Composite_wMort_FU_Time~ "Composite End-point Followup Time", 
+                                     Composite_wMort_FU_Age~ "Composite End-point Followup Age",
+                                     Composite_BIN_woMort~ "Composite End-point (without mortality)", 
+                                     Composite_woMort_FU_Time~ "Composite End-point (without mortality) Followup Time",
+                                     Composite_woMort_FU_Age~ "Composite End-point (without mortality) Followup Age")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+
+TableOne <- tbl_stack(list(TableOne_A, TableOne_B, TableOne_C, TableOne_D, TableOne_E, TableOne_F, TableOne_G), quiet = NULL, group_header = c( "Characteristics", "Past Medical History", "AVR", "Dimentions", "Valves", "Exercise", "Outcomes")) %>%
+  as_gt() %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(groups = everything())
+  )
+
+gtsave(TableOne, "TableOne/TableOne_Exercise.html")
+```
+
+```{r By Ethnicity Group}
+TableOne_A <- tbl_summary(Combined,
+                        by = "Ethnicity",
+                        missing = "no",
+                        statistic = list(all_of(NormA) ~ "{mean} ({sd})"),
+                        include = all_of(A),
+                        label = list(Age_FU ~ "Age at first Echocardiography",
+                                     Age_Diagnosis ~ "Age at time of BAV Diagnosis",
+                                     Gender ~ "Sex",
+                              #       Ethnicity ~ "Ethnicity",
+                                     Height ~ "Height",
+                                     Weight ~ "Weight",
+                                     BMI ~ "BMI (kg/m2)",
+                                     How_Diagnosed ~ "How BAV was diagnosed",
+                                     BAV_Morphology ~ "Morphology of BAV",
+                                     Outcomes_Standardised ~ "Outcomes Standardised",
+                                     Initial_Interaction_forsurgery ~ "Initial Interaction was for surgery?" )) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+TableOne_B <- tbl_summary(Combined,
+                        by = "Ethnicity",
+                        missing = "no",
+                        statistic = list(all_of(NormB) ~ "{mean} ({sd})"),
+                        include = all_of(B),
+                        label = list(Hypertension ~ "Hypertension",
+                                     AF ~ "Atrial Fibrillation",
+                                     IHD ~ "Ischaemic Heart Disease",
+                                     T2DM ~ "Type 2 Diabetes Mellitus",
+                                     Hyperlipidaemia ~ "Hyperlipidaemia",
+                                     CVA ~ "Cerebrovascular Event",
+                                     DCM ~ "Dilated Cardiomyopathy",
+                                     PPM ~ "Permanant Pacemaker",
+                                     Coarctation ~ "Aortic Coarctation",
+                                     FHx_FDRwBAV ~ "Family History of Bicuspid Aortic Valve")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_C <- tbl_summary(Combined,
+                        by = "Ethnicity",
+                        missing = "no",
+                        statistic = list(all_of(NormC) ~ "{mean} ({sd})"),
+                        include = all_of(C),
+                        label = list(AVR_BIN ~ "Aortic Valve Repair/Replacement", 
+                                     Age_Intervention_AVR ~ "Age at AVR", 
+                                     Surgery_AVR ~ "Type of AVR", 
+                                     AVR_Date ~ "Date of AVR")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+TableOne_D <- tbl_summary(Combined,
+                        by = "Ethnicity",
+                        missing = "no",
+                        statistic = list(all_of(NormD) ~ "{mean} ({sd})"),
+                        include = all_of(D)) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_E <- tbl_summary(Combined,
+                        by = "Ethnicity",
+                        missing = "no",
+                        statistic = list(all_of(NormE) ~ "{mean} ({sd})"),
+                        include = all_of(E)) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(simulate.p.value = T)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_F <- tbl_summary(Combined,
+                        by = "Ethnicity",
+                        missing = "no",
+                        statistic = list(all_of(NormF) ~ "{mean} ({sd})"),
+                        include = all_of(F),
+                        label = list(Average_Met_Min_Week ~ "Average Metabolic Minutes a Week",
+                                     Elite_Athlete ~ "Elite Athelete",
+                                     Exercise_Group ~ "Exercise Group")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_G <- tbl_summary(Combined,
+                        by = "Ethnicity",
+                        missing = "no",
+                        statistic = list(all_of(NormG) ~ "{mean} ({sd})"),
+                        include = all_of(G),
+                        label = list(CV_Mortality ~ "Cardiovascular Mortality",
+                                     Mortality ~ "Mortality", 
+                                     Mortality_FU_Time ~ "Mortality Followup Time", 
+                                     Mortality_FU_Age ~ "Mortality Followup Age",
+                                     AVR_BIN~ "Aortic Valve Repair/Replacement", 
+                                     AVR_FU_Time~ "Aortic Valve Repair/Replacement Followup Time",
+                                     AVR_FU_Age~ "Aortic Valve Repair/Replacement Followup Age", 
+                                     Severe_AS~ "Severe Aortic Stenosis", 
+                                     Severe_AS_FU_Time~ "ASevere Aortic Stenosis Followup Time",
+                                     Severe_AS_FU_Age~ "ASevere Aortic Stenosis Followup Age",
+                                     Severe_AR~ "Severe Aortic Regurgitation ", 
+                                     Severe_AR_FU_Time~ "Severe Aortic Regurgitation Followup Time",
+                                     Severe_AR_FU_Age~ "Severe Aortic Regurgitation Followup Age",
+                                     Severe_AoDilatation~ "Severe Aortic Dilatation",
+                                     Severe_AoDilatation_FU_Time~ "Aortic Dilatation Followup Time",
+                                     Severe_AoDilatation_FU_Age~ "Aortic Dilatation Followup Age",
+                                     Composite_BIN_wMort~ "Composite End-point",
+                                     Composite_wMort_FU_Time~ "Composite End-point Followup Time", 
+                                     Composite_wMort_FU_Age~ "Composite End-point Followup Age",
+                                     Composite_BIN_woMort~ "Composite End-point (without mortality)", 
+                                     Composite_woMort_FU_Time~ "Composite End-point (without mortality) Followup Time",
+                                     Composite_woMort_FU_Age~ "Composite End-point (without mortality) Followup Age")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+
+TableOne <- tbl_stack(list(TableOne_A, TableOne_B, TableOne_C, TableOne_D, TableOne_E, TableOne_F, TableOne_G), quiet = NULL, group_header = c( "Characteristics", "Past Medical History", "AVR", "Dimentions", "Valves", "Exercise", "Outcomes")) %>%
+  as_gt() %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(groups = everything())
+  )
+
+gtsave(TableOne, "TableOne/TableOne_Ethnicity.html")
+```
+
+```{r By Gender Group}
+TableOne_A <- tbl_summary(Combined,
+                        by = "Gender",
+                        missing = "no",
+                        statistic = list(all_of(NormA) ~ "{mean} ({sd})"),
+                        include = all_of(A),
+                        label = list(Age_FU ~ "Age at first Echocardiography",
+                                     Age_Diagnosis ~ "Age at time of BAV Diagnosis",
+                               #      Gender ~ "Sex",
+                                     Ethnicity ~ "Ethnicity",
+                                     Height ~ "Height",
+                                     Weight ~ "Weight",
+                                     BMI ~ "BMI (kg/m2)",
+                                     How_Diagnosed ~ "How BAV was diagnosed",
+                                     BAV_Morphology ~ "Morphology of BAV",
+                                     Outcomes_Standardised ~ "Outcomes Standardised",
+                                     Initial_Interaction_forsurgery ~ "Initial Interaction was for surgery?" )) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+TableOne_B <- tbl_summary(Combined,
+                        by = "Gender",
+                        missing = "no",
+                        statistic = list(all_of(NormB) ~ "{mean} ({sd})"),
+                        include = all_of(B),
+                        label = list(Hypertension ~ "Hypertension",
+                                     AF ~ "Atrial Fibrillation",
+                                     IHD ~ "Ischaemic Heart Disease",
+                                     T2DM ~ "Type 2 Diabetes Mellitus",
+                                     Hyperlipidaemia ~ "Hyperlipidaemia",
+                                     CVA ~ "Cerebrovascular Event",
+                                     DCM ~ "Dilated Cardiomyopathy",
+                                     PPM ~ "Permanant Pacemaker",
+                                     Coarctation ~ "Aortic Coarctation",
+                                     FHx_FDRwBAV ~ "Family History of Bicuspid Aortic Valve")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_C <- tbl_summary(Combined,
+                        by = "Gender",
+                        missing = "no",
+                        statistic = list(all_of(NormC) ~ "{mean} ({sd})"),
+                        include = all_of(C),
+                        label = list(AVR_BIN ~ "Aortic Valve Repair/Replacement", 
+                                     Age_Intervention_AVR ~ "Age at AVR", 
+                                     Surgery_AVR ~ "Type of AVR", 
+                                     AVR_Date ~ "Date of AVR")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+TableOne_D <- tbl_summary(Combined,
+                        by = "Gender",
+                        missing = "no",
+                        statistic = list(all_of(NormD) ~ "{mean} ({sd})"),
+                        include = all_of(D)) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_E <- tbl_summary(Combined,
+                        by = "Gender",
+                        missing = "no",
+                        statistic = list(all_of(NormE) ~ "{mean} ({sd})"),
+                        include = all_of(E)) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(simulate.p.value = T)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_F <- tbl_summary(Combined,
+                        by = "Gender",
+                        missing = "no",
+                        statistic = list(all_of(NormF) ~ "{mean} ({sd})"),
+                        include = all_of(F),
+                        label = list(Average_Met_Min_Week ~ "Average Metabolic Minutes a Week",
+                                     Elite_Athlete ~ "Elite Athelete",
+                                     Exercise_Group ~ "Exercise Group")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_G <- tbl_summary(Combined,
+                        by = "Gender",
+                        missing = "no",
+                        statistic = list(all_of(NormG) ~ "{mean} ({sd})"),
+                        include = all_of(G),
+                        label = list(CV_Mortality ~ "Cardiovascular Mortality",
+                                     Mortality ~ "Mortality", 
+                                     Mortality_FU_Time ~ "Mortality Followup Time", 
+                                     Mortality_FU_Age ~ "Mortality Followup Age",
+                                     AVR_BIN~ "Aortic Valve Repair/Replacement", 
+                                     AVR_FU_Time~ "Aortic Valve Repair/Replacement Followup Time",
+                                     AVR_FU_Age~ "Aortic Valve Repair/Replacement Followup Age", 
+                                     Severe_AS~ "Severe Aortic Stenosis", 
+                                     Severe_AS_FU_Time~ "ASevere Aortic Stenosis Followup Time",
+                                     Severe_AS_FU_Age~ "ASevere Aortic Stenosis Followup Age",
+                                     Severe_AR~ "Severe Aortic Regurgitation ", 
+                                     Severe_AR_FU_Time~ "Severe Aortic Regurgitation Followup Time",
+                                     Severe_AR_FU_Age~ "Severe Aortic Regurgitation Followup Age",
+                                     Severe_AoDilatation~ "Severe Aortic Dilatation",
+                                     Severe_AoDilatation_FU_Time~ "Aortic Dilatation Followup Time",
+                                     Severe_AoDilatation_FU_Age~ "Aortic Dilatation Followup Age",
+                                     Composite_BIN_wMort~ "Composite End-point",
+                                     Composite_wMort_FU_Time~ "Composite End-point Followup Time", 
+                                     Composite_wMort_FU_Age~ "Composite End-point Followup Age",
+                                     Composite_BIN_woMort~ "Composite End-point (without mortality)", 
+                                     Composite_woMort_FU_Time~ "Composite End-point (without mortality) Followup Time",
+                                     Composite_woMort_FU_Age~ "Composite End-point (without mortality) Followup Age")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+
+TableOne <- tbl_stack(list(TableOne_A, TableOne_B, TableOne_C, TableOne_D, TableOne_E, TableOne_F, TableOne_G), quiet = NULL, group_header = c( "Characteristics", "Past Medical History", "AVR", "Dimentions", "Valves", "Exercise", "Outcomes")) %>%
+  as_gt() %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(groups = everything())
+  )
+
+gtsave(TableOne, "TableOne/TableOne_Gender.html")
+```
+
+```{r By Coarctation Group}
+TableOne_A <- tbl_summary(Combined,
+                        by = "Coarctation",
+                        missing = "no",
+                        statistic = list(all_of(NormA) ~ "{mean} ({sd})"),
+                        include = all_of(A),
+                        label = list(Age_FU ~ "Age at first Echocardiography",
+                                     Age_Diagnosis ~ "Age at time of BAV Diagnosis",
+                                     Gender ~ "Sex",
+                                     Ethnicity ~ "Ethnicity",
+                                     Height ~ "Height",
+                                     Weight ~ "Weight",
+                                     BMI ~ "BMI (kg/m2)",
+                                     How_Diagnosed ~ "How BAV was diagnosed",
+                                     BAV_Morphology ~ "Morphology of BAV",
+                                     Outcomes_Standardised ~ "Outcomes Standardised",
+                                     Initial_Interaction_forsurgery ~ "Initial Interaction was for surgery?" )) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+TableOne_B <- tbl_summary(Combined,
+                        by = "Coarctation",
+                        missing = "no",
+                        statistic = list(all_of(NormB) ~ "{mean} ({sd})"),
+                        include = all_of(B),
+                        label = list(Hypertension ~ "Hypertension",
+                                     AF ~ "Atrial Fibrillation",
+                                     IHD ~ "Ischaemic Heart Disease",
+                                     T2DM ~ "Type 2 Diabetes Mellitus",
+                                     Hyperlipidaemia ~ "Hyperlipidaemia",
+                                     CVA ~ "Cerebrovascular Event",
+                                     DCM ~ "Dilated Cardiomyopathy",
+                                     PPM ~ "Permanant Pacemaker",
+                                   #  Coarctation ~ "Aortic Coarctation",
+                                     FHx_FDRwBAV ~ "Family History of Bicuspid Aortic Valve")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_C <- tbl_summary(Combined,
+                        by = "Coarctation",
+                        missing = "no",
+                        statistic = list(all_of(NormC) ~ "{mean} ({sd})"),
+                        include = all_of(C),
+                        label = list(AVR_BIN ~ "Aortic Valve Repair/Replacement", 
+                                     Age_Intervention_AVR ~ "Age at AVR", 
+                                     Surgery_AVR ~ "Type of AVR", 
+                                     AVR_Date ~ "Date of AVR")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+TableOne_D <- tbl_summary(Combined,
+                        by = "Coarctation",
+                        missing = "no",
+                        statistic = list(all_of(NormD) ~ "{mean} ({sd})"),
+                        include = all_of(D)) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_E <- tbl_summary(Combined,
+                        by = "Coarctation",
+                        missing = "no",
+                        statistic = list(all_of(NormE) ~ "{mean} ({sd})"),
+                        include = all_of(E)) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(simulate.p.value = T)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_F <- tbl_summary(Combined,
+                        by = "Coarctation",
+                        missing = "no",
+                        statistic = list(all_of(NormF) ~ "{mean} ({sd})"),
+                        include = all_of(F),
+                        label = list(Average_Met_Min_Week ~ "Average Metabolic Minutes a Week",
+                                     Elite_Athlete ~ "Elite Athelete",
+                                     Exercise_Group ~ "Exercise Group")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_G <- tbl_summary(Combined,
+                        by = "Coarctation",
+                        missing = "no",
+                        statistic = list(all_of(NormG) ~ "{mean} ({sd})"),
+                        include = all_of(G),
+                        label = list(CV_Mortality ~ "Cardiovascular Mortality",
+                                     Mortality ~ "Mortality", 
+                                     Mortality_FU_Time ~ "Mortality Followup Time", 
+                                     Mortality_FU_Age ~ "Mortality Followup Age",
+                                     AVR_BIN~ "Aortic Valve Repair/Replacement", 
+                                     AVR_FU_Time~ "Aortic Valve Repair/Replacement Followup Time",
+                                     AVR_FU_Age~ "Aortic Valve Repair/Replacement Followup Age", 
+                                     Severe_AS~ "Severe Aortic Stenosis", 
+                                     Severe_AS_FU_Time~ "ASevere Aortic Stenosis Followup Time",
+                                     Severe_AS_FU_Age~ "ASevere Aortic Stenosis Followup Age",
+                                     Severe_AR~ "Severe Aortic Regurgitation ", 
+                                     Severe_AR_FU_Time~ "Severe Aortic Regurgitation Followup Time",
+                                     Severe_AR_FU_Age~ "Severe Aortic Regurgitation Followup Age",
+                                     Severe_AoDilatation~ "Severe Aortic Dilatation",
+                                     Severe_AoDilatation_FU_Time~ "Aortic Dilatation Followup Time",
+                                     Severe_AoDilatation_FU_Age~ "Aortic Dilatation Followup Age",
+                                     Composite_BIN_wMort~ "Composite End-point",
+                                     Composite_wMort_FU_Time~ "Composite End-point Followup Time", 
+                                     Composite_wMort_FU_Age~ "Composite End-point Followup Age",
+                                     Composite_BIN_woMort~ "Composite End-point (without mortality)", 
+                                     Composite_woMort_FU_Time~ "Composite End-point (without mortality) Followup Time",
+                                     Composite_woMort_FU_Age~ "Composite End-point (without mortality) Followup Age")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+
+TableOne <- tbl_stack(list(TableOne_A, TableOne_B, TableOne_C, TableOne_D, TableOne_E, TableOne_F, TableOne_G), quiet = NULL, group_header = c( "Characteristics", "Past Medical History", "AVR", "Dimentions", "Valves", "Exercise", "Outcomes")) %>%
+  as_gt() %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(groups = everything())
+  )
+
+gtsave(TableOne, "TableOne/TableOne_CoArctation.html")
+```
+
+```{r By BAVMorph Group}
+TableOne_A <- tbl_summary(Combined,
+                        by = "BAV_Morphology",
+                        missing = "no",
+                        statistic = list(all_of(NormA) ~ "{mean} ({sd})"),
+                        include = all_of(A),
+                        label = list(Age_FU ~ "Age at first Echocardiography",
+                                     Age_Diagnosis ~ "Age at time of BAV Diagnosis",
+                                     Gender ~ "Sex",
+                                     Ethnicity ~ "Ethnicity",
+                                     Height ~ "Height",
+                                     Weight ~ "Weight",
+                                     BMI ~ "BMI (kg/m2)",
+                                     How_Diagnosed ~ "How BAV was diagnosed",
+                                 #    BAV_Morphology ~ "Morphology of BAV",
+                                     Outcomes_Standardised ~ "Outcomes Standardised",
+                                     Initial_Interaction_forsurgery ~ "Initial Interaction was for surgery?" )) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+TableOne_B <- tbl_summary(Combined,
+                        by = "BAV_Morphology",
+                        missing = "no",
+                        statistic = list(all_of(NormB) ~ "{mean} ({sd})"),
+                        include = all_of(B),
+                        label = list(Hypertension ~ "Hypertension",
+                                     AF ~ "Atrial Fibrillation",
+                                     IHD ~ "Ischaemic Heart Disease",
+                                     T2DM ~ "Type 2 Diabetes Mellitus",
+                                     Hyperlipidaemia ~ "Hyperlipidaemia",
+                                     CVA ~ "Cerebrovascular Event",
+                                     DCM ~ "Dilated Cardiomyopathy",
+                                     PPM ~ "Permanant Pacemaker",
+                                     Coarctation ~ "Aortic Coarctation",
+                                     FHx_FDRwBAV ~ "Family History of Bicuspid Aortic Valve")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_C <- tbl_summary(Combined,
+                        by = "BAV_Morphology",
+                        missing = "no",
+                        statistic = list(all_of(NormC) ~ "{mean} ({sd})"),
+                        include = all_of(C),
+                        label = list(AVR_BIN ~ "Aortic Valve Repair/Replacement", 
+                                     Age_Intervention_AVR ~ "Age at AVR", 
+                                     Surgery_AVR ~ "Type of AVR", 
+                                     AVR_Date ~ "Date of AVR")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+TableOne_D <- tbl_summary(Combined,
+                        by = "BAV_Morphology",
+                        missing = "no",
+                        statistic = list(all_of(NormD) ~ "{mean} ({sd})"),
+                        include = all_of(D)) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_E <- tbl_summary(Combined,
+                        by = "BAV_Morphology",
+                        missing = "no",
+                        statistic = list(all_of(NormE) ~ "{mean} ({sd})"),
+                        include = all_of(E)) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(simulate.p.value = T)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_F <- tbl_summary(Combined,
+                        by = "BAV_Morphology",
+                        missing = "no",
+                        statistic = list(all_of(NormF) ~ "{mean} ({sd})"),
+                        include = all_of(F),
+                        label = list(Average_Met_Min_Week ~ "Average Metabolic Minutes a Week",
+                                     Elite_Athlete ~ "Elite Athelete",
+                                     Exercise_Group ~ "Exercise Group")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p()
+
+TableOne_G <- tbl_summary(Combined,
+                        by = "BAV_Morphology",
+                        missing = "no",
+                        statistic = list(all_of(NormG) ~ "{mean} ({sd})"),
+                        include = all_of(G),
+                        label = list(CV_Mortality ~ "Cardiovascular Mortality",
+                                     Mortality ~ "Mortality", 
+                                     Mortality_FU_Time ~ "Mortality Followup Time", 
+                                     Mortality_FU_Age ~ "Mortality Followup Age",
+                                     AVR_BIN~ "Aortic Valve Repair/Replacement", 
+                                     AVR_FU_Time~ "Aortic Valve Repair/Replacement Followup Time",
+                                     AVR_FU_Age~ "Aortic Valve Repair/Replacement Followup Age", 
+                                     Severe_AS~ "Severe Aortic Stenosis", 
+                                     Severe_AS_FU_Time~ "ASevere Aortic Stenosis Followup Time",
+                                     Severe_AS_FU_Age~ "ASevere Aortic Stenosis Followup Age",
+                                     Severe_AR~ "Severe Aortic Regurgitation ", 
+                                     Severe_AR_FU_Time~ "Severe Aortic Regurgitation Followup Time",
+                                     Severe_AR_FU_Age~ "Severe Aortic Regurgitation Followup Age",
+                                     Severe_AoDilatation~ "Severe Aortic Dilatation",
+                                     Severe_AoDilatation_FU_Time~ "Aortic Dilatation Followup Time",
+                                     Severe_AoDilatation_FU_Age~ "Aortic Dilatation Followup Age",
+                                     Composite_BIN_wMort~ "Composite End-point",
+                                     Composite_wMort_FU_Time~ "Composite End-point Followup Time", 
+                                     Composite_wMort_FU_Age~ "Composite End-point Followup Age",
+                                     Composite_BIN_woMort~ "Composite End-point (without mortality)", 
+                                     Composite_woMort_FU_Time~ "Composite End-point (without mortality) Followup Time",
+                                     Composite_woMort_FU_Age~ "Composite End-point (without mortality) Followup Age")) %>%
+  add_p(test.args = all_tests("fisher.test") ~ list(workspace=2e99)) %>%
+  add_overall() %>%
+  bold_p() 
+
+
+TableOne <- tbl_stack(list(TableOne_A, TableOne_B, TableOne_C, TableOne_D, TableOne_E, TableOne_F, TableOne_G), quiet = NULL, group_header = c( "Characteristics", "Past Medical History", "AVR", "Dimentions", "Valves", "Exercise", "Outcomes")) %>%
+  as_gt() %>%
+  gt::tab_style(
+    style = gt::cell_text(weight = "bold"),
+    locations = gt::cells_row_groups(groups = everything())
+  )
+
+gtsave(TableOne, "TableOne/TableOne_BAVMorph.html")
+```
+
+```{r Handling Echos}
+Check <- Combined %>% select(ID, Echo_1_Date, ends_with("1"), Echo_2_Date, ends_with("2"), Echo_3_Date, ends_with("3"), -Echo2_1)
+
+X <- Check %>%
+  select(ID, Echo_1_Date, ends_with("1"))
+
+X$na_count <- apply(X, 1, function(x) sum(is.na(x))) 
+
+Echo1a <- X %>%
+  filter(!is.na(Echo_1_Date)) %>%
+  arrange(desc(na_count))  %>%
+  filter(na_count > 2) %>%
+  relocate(na_count, .after = ID)
+
+Y <- Check %>%
+  select(ID, Echo_2_Date, ends_with("2"), -Echo3_2)
+
+Y$na_count <- apply(Y, 1, function(x) sum(is.na(x))) 
+
+Echo2a <- Y %>%
+  filter(!is.na(Echo_2_Date)) %>%
+  arrange(desc(na_count)) %>%
+  filter(na_count > 2) %>%
+  relocate(na_count, .after = ID)
+
+
+Z <- Check %>%
+  select(ID, Echo_3_Date, ends_with("3"))
+
+Z$na_count <- apply(Z, 1, function(x) sum(is.na(x))) 
+
+Echo3a <- Z %>%
+  filter(!is.na(Echo_3_Date)) %>%
+  arrange(desc(na_count)) %>%
+  filter(na_count > 2) %>%
+  relocate(na_count, .after = ID)
+```
+
+```{r Handling Echos part 2}
+Check <- Combined %>% select(ID, Echo_1_Date, ends_with("1"), Echo_2_Date, ends_with("2"), Echo_3_Date, ends_with("3"), -Echo2_1)
+
+X <- Check %>%
+  select(ID, Echo_1_Date, ends_with("1"))
+
+X$na_count <- apply(X, 1, function(x) sum(is.na(x))) 
+
+Echo1b <- X %>%
+  filter(is.na(Echo_1_Date)) %>%
+  arrange(desc(na_count))  %>%
+  filter(na_count < 15) %>%
+  relocate(na_count, .after = ID)
+
+Y <- Check %>%
+  select(ID, Echo_2_Date, ends_with("2"), -Echo3_2)
+
+Y$na_count <- apply(Y, 1, function(x) sum(is.na(x))) 
+
+Echo2b <- Y %>%
+  filter(is.na(Echo_2_Date)) %>%
+  arrange(desc(na_count)) %>%
+  filter(na_count < 15) %>%
+  relocate(na_count, .after = ID)
+
+
+Z <- Check %>%
+  select(ID, Echo_3_Date, ends_with("3"))
+
+Z$na_count <- apply(Z, 1, function(x) sum(is.na(x))) 
+
+Echo3b <- Z %>%
+  filter(is.na(Echo_3_Date)) %>%
+  arrange(desc(na_count)) %>%
+  filter(na_count < 15) %>%
+  relocate(na_count, .after = ID)
+```
+
+```{r Creating Combined Subset}
+SubSet1 <- Combined_C %>%
+  mutate(AR_Severity_1 = as.numeric(AR_Severity_1),
+         AS_Severity_1 = as.numeric(AS_Severity_1)) %>%
+  select(ID, ends_with("1"), Echo_1a, Exercise_Group, Exercise_Group_Seden_BIN, Gender, Coarctation, Ethnicity, BAV_Morphology) %>% 
+  pivot_longer(ends_with("1"),
+               names_to = "Names",
+               values_to = "Values") %>%
+  mutate(Names = str_replace_all(Names, "_1", ""),
+         Echo = Echo_1a) %>%
+  select(-Echo_1a)
+
+SubSet2 <- Combined_C %>%
+  mutate(AR_Severity_2 = as.numeric(AR_Severity_2),
+         AS_Severity_2 = as.numeric(AS_Severity_2)) %>%
+  select(ID,ends_with("2"), Echo_2a, Exercise_Group, Exercise_Group_Seden_BIN, Gender, Coarctation, Ethnicity, BAV_Morphology) %>% 
+  pivot_longer(ends_with("2"),
+               names_to = "Names",
+               values_to = "Values") %>%
+  mutate(Names = str_replace_all(Names, "_2", ""),
+         Echo = Echo_2a) %>%
+  select(-Echo_2a)
+
+SubSet3 <- Combined_C %>%
+  mutate(AR_Severity_3 = as.numeric(AR_Severity_3),
+         AS_Severity_3 = as.numeric(AS_Severity_3)) %>%
+  select(ID,ends_with("3"), Echo_3a, Exercise_Group, Exercise_Group_Seden_BIN, Gender, Coarctation, Ethnicity, BAV_Morphology) %>% 
+  pivot_longer(ends_with("3"),
+               names_to = "Names",
+               values_to = "Values") %>%
+  mutate(Names = str_replace_all(Names, "_3", ""),
+         Echo = Echo_3a) %>%
+  select(-Echo_3a)
+
+CompleteSubset_2 <- rbind(SubSet1, SubSet2)
+CompleteSubset_3 <- rbind(SubSet1, SubSet2, SubSet3)
+
+```
+
+```{r Creating plots rate of increase}
+
+plot_list_BIN <- list()
+
+Variables <- c("SOV", "STJ", "AA", "LVEDD", "LVESD", "LV_Septum", "LVEF", "AV_Peak_Velocity", "AV_Mean_Velocity", "LVOT_Peak_Velocity", "LVOT_Mean_Velocity")
+
+doParallel::registerDoParallel()
+
+for (i in 1:11) {
+  
+Plot1 <- CompleteSubset_3 %>%
+  filter(Names == paste0(Variables[i])) %>%
+  filter(!is.na(Values) == T) %>%
+  group_by(ID, Exercise_Group_Seden_BIN) %>%
+  mutate(Echo = Echo/365.2422) %>%
+  summarise(Variable = as.numeric(coef(lm(Values~Echo))[2]))
+
+plot_list_BIN[[i]] <- ggstatsplot::ggbetweenstats(Plot1, Exercise_Group_Seden_BIN, Variable, p.adjust.method = "none", ylab = Variables[i], type = "np")
+
+}
+
+cairo_pdf(filename = "Rate_of_Increase_Plots/Plots_BIN.pdf",
+         width = 6, height = 6, onefile = T)
+print(plot_list_BIN[[1]])
+print(plot_list_BIN[[2]])
+print(plot_list_BIN[[3]])
+print(plot_list_BIN[[4]])
+print(plot_list_BIN[[5]])
+print(plot_list_BIN[[6]])
+print(plot_list_BIN[[7]])
+print(plot_list_BIN[[8]])
+print(plot_list_BIN[[9]])
+print(plot_list_BIN[[10]])
+print(plot_list_BIN[[11]])
+dev.off()
+
+plot_list <- list()
+
+doParallel::registerDoParallel()
+
+for (i in 1:11) {
+  
+Plot1 <- CompleteSubset_3 %>%
+  filter(Names == paste0(Variables[i])) %>%
+  filter(!is.na(Values) == T) %>%
+  group_by(ID, Exercise_Group) %>%
+  mutate(Echo = Echo/365.2422) %>%
+  summarise(Variable = as.numeric(coef(lm(Values~Echo))[2]))
+
+plot_list[[i]] <- ggstatsplot::ggbetweenstats(Plot1, Exercise_Group, Variable, p.adjust.method = "none", ylab = Variables[i], type = "np")
+
+}
+
+cairo_pdf(filename = "Rate_of_Increase_Plots/Plots_AllExerciseGrp.pdf",
+         width = 6, height = 6, onefile = T)
+print(plot_list[[1]])
+print(plot_list[[2]])
+print(plot_list[[3]])
+print(plot_list[[4]])
+print(plot_list[[5]])
+print(plot_list[[6]])
+print(plot_list[[7]])
+print(plot_list[[8]])
+print(plot_list[[9]])
+print(plot_list[[10]])
+print(plot_list[[11]])
+dev.off()
+
+plot_list <- list()
+
+doParallel::registerDoParallel()
+
+for (i in 1:11) {
+  
+Plot1 <- CompleteSubset_3 %>%
+  filter(Names == paste0(Variables[i])) %>%
+  filter(!is.na(Values) == T) %>%
+  group_by(ID, Gender) %>%
+  mutate(Echo = Echo/365.2422) %>%
+  summarise(Variable = as.numeric(coef(lm(Values~Echo))[2]))
+
+plot_list[[i]] <- ggstatsplot::ggbetweenstats(Plot1, Gender, Variable, p.adjust.method = "none", ylab = Variables[i], type = "np")
+
+}
+
+cairo_pdf(filename = "Rate_of_Increase_Plots/Plots_Gender.pdf",
+         width = 6, height = 6, onefile = T)
+print(plot_list[[1]])
+print(plot_list[[2]])
+print(plot_list[[3]])
+print(plot_list[[4]])
+print(plot_list[[5]])
+print(plot_list[[6]])
+print(plot_list[[7]])
+print(plot_list[[8]])
+print(plot_list[[9]])
+print(plot_list[[10]])
+print(plot_list[[11]])
+dev.off()
+
+
+plot_list <- list()
+
+doParallel::registerDoParallel()
+
+for (i in 1:11) {
+  
+Plot1 <- CompleteSubset_3 %>%
+  filter(Names == paste0(Variables[i])) %>%
+  filter(!is.na(Values) == T) %>%
+  group_by(ID, Ethnicity) %>%
+  mutate(Echo = Echo/365.2422) %>%
+  summarise(Variable = as.numeric(coef(lm(Values~Echo))[2]))
+
+plot_list[[i]] <- ggstatsplot::ggbetweenstats(Plot1, Ethnicity, Variable, p.adjust.method = "none", ylab = Variables[i], type = "np")
+
+}
+
+cairo_pdf(filename = "Rate_of_Increase_Plots/Plots_Ethnicity.pdf",
+         width = 6, height = 6, onefile = T)
+print(plot_list[[1]])
+print(plot_list[[2]])
+print(plot_list[[3]])
+print(plot_list[[4]])
+print(plot_list[[5]])
+print(plot_list[[6]])
+print(plot_list[[7]])
+print(plot_list[[8]])
+print(plot_list[[9]])
+print(plot_list[[10]])
+print(plot_list[[11]])
+dev.off()
+
+
+plot_list <- list()
+
+doParallel::registerDoParallel()
+
+for (i in 1:11) {
+  
+Plot1 <- CompleteSubset_3 %>%
+  filter(Names == paste0(Variables[i])) %>%
+  filter(!is.na(Values) == T) %>%
+  group_by(ID, Coarctation) %>%
+  mutate(Echo = Echo/365.2422) %>%
+  summarise(Variable = as.numeric(coef(lm(Values~Echo))[2]))
+
+plot_list[[i]] <- ggstatsplot::ggbetweenstats(Plot1, Coarctation, Variable, p.adjust.method = "none", ylab = Variables[i], type = "np")
+
+}
+
+cairo_pdf(filename = "Rate_of_Increase_Plots/Plots_Coarctation.pdf",
+         width = 6, height = 6, onefile = T)
+print(plot_list[[1]])
+print(plot_list[[2]])
+print(plot_list[[3]])
+print(plot_list[[4]])
+print(plot_list[[5]])
+print(plot_list[[6]])
+print(plot_list[[7]])
+print(plot_list[[8]])
+print(plot_list[[9]])
+print(plot_list[[10]])
+print(plot_list[[11]])
+dev.off()
+
+
+plot_list <- list()
+
+doParallel::registerDoParallel()
+
+for (i in 1:11) {
+  
+Plot1 <- CompleteSubset_3 %>%
+  filter(Names == paste0(Variables[i])) %>%
+  filter(!is.na(Values) == T) %>%
+  group_by(ID, BAV_Morphology) %>%
+  mutate(Echo = Echo/365.2422) %>%
+  summarise(Variable = as.numeric(coef(lm(Values~Echo))[2]))
+
+plot_list[[i]] <- ggstatsplot::ggbetweenstats(Plot1, BAV_Morphology, Variable, p.adjust.method = "none", ylab = Variables[i], type = "np")
+
+}
+
+cairo_pdf(filename = "Rate_of_Increase_Plots/Plots_BAV_Morphology.pdf",
+         width = 6, height = 6, onefile = T)
+print(plot_list[[1]])
+print(plot_list[[2]])
+print(plot_list[[3]])
+print(plot_list[[4]])
+print(plot_list[[5]])
+print(plot_list[[6]])
+print(plot_list[[7]])
+print(plot_list[[8]])
+print(plot_list[[9]])
+print(plot_list[[10]])
+print(plot_list[[11]])
+dev.off()
+
+```
+
+```{r Univariate Tables}
+UV_T <- list()
+
+Outcomes <- c("AVR_BIN", "Composite_BIN_wMort", "Composite_BIN_woMort")
+Followups <- c("AVR_FU_Time", "Composite_wMort_FU_Time", "Composite_woMort_FU_Time")
+
+doParallel::registerDoParallel()
+
+for (i in 1:3) {
+
+UV_T[[i]] <- tbl_uvregression(Combined_C,
+                 method = coxph,
+                 y = Surv(time = !!sym(Followups[i]), event = as.numeric(!!sym(Outcomes[i]))),
+                 exponentiate = T,
+                 include = c(Age_Diagnosis, Age_Intervention_AVR, Gender, Ethnicity, Height, Weight, BMI, How_Diagnosed, BAV_Morphology, Initial_Interaction_forsurgery, Outcomes_Standardised, Coarctation, Hypertension, AF, IHD, T2DM, Hyperlipidaemia, CVA, DCM, PPM, FHx_FDRwBAV, CMR_BIN, Echo_1_Date, Echo_2_Date, Echo_3_Date, SOV_1, SOV_2, SOV_3, Max_SOV, STJ_1, STJ_2, STJ_3, Max_STJ, AA_1, AA_2, AA_3, Max_AA, LVEDD_1, LVEDD_2, LVEDD_3, LVESD_1, LVESD_2, LVESD_3, LV_Septum_1, LV_Septum_2, LV_Septum_3, LVEF_1, LVEF_2, LVEF_3, AR_Severity_1, AR_Severity_2, AR_Severity_3, AS_Severity_1, AS_Severity_2, AS_Severity_3, AV_Peak_Velocity_1, AV_Peak_Velocity_2, AV_Peak_Velocity_3, AV_Mean_Velocity_1, AV_Mean_Velocity_2, AV_Mean_Velocity_3, LVOT_Peak_Velocity_1, LVOT_Peak_Velocity_2, LVOT_Peak_Velocity_3, LVOT_Mean_Velocity_1, LVOT_Mean_Velocity_2, LVOT_Mean_Velocity_3, LVOT_Diameter_1, LVOT_Diameter_2, LVOT_Diameter_3, Average_Met_Min_Week, Elite_Athlete, Exercise_Group, Exercise_Group_Seden_BIN, Mortality, Date_Death, Mortality_FU_Time, AVR_BIN, AVR_Date, AVR_FU_Time, Surgery_AVR, AVR_Indication, Severe_AS, Severe_AS_FU_Time, Severe_AR, Severe_AR_FU_Time, Severe_AoDilatation, Severe_AoDilatation_FU_Time, Composite_BIN_wMort, Composite_wMort_FU_Time, Composite_BIN_woMort, Composite_woMort_FU_Time)) %>%
+  modify_header(label = paste0("**",Outcomes[i],"**", " (Univariate)")) %>%
+  bold_p() %>%
+  as_gt()
+
+gtsave(UV_T[[i]], paste0("UV_Tables/" , Outcomes[i], "_UV.html"))
+
+}
+
+Outcomes <- c("Mortality", "Severe_AS", "Severe_AR", "Severe_AoDilatation")
+Followups <- c("Mortality_FU_Time", "Severe_AS_FU_Time", "Severe_AR_FU_Time", "Severe_AoDilatation_FU_Time")
+
+for (i in 1:4) {
+
+UV_T[[i]] <- tbl_uvregression(Combined,
+                 method = coxph,
+                 y = Surv(time = !!sym(Followups[i]), event = as.numeric(!!sym(Outcomes[i]))),
+                 exponentiate = T,
+                 include = c(Age_Diagnosis, Age_Intervention_AVR, Gender, Ethnicity, Height, Weight, BMI, How_Diagnosed, BAV_Morphology, Initial_Interaction_forsurgery, Outcomes_Standardised, Coarctation, Hypertension, AF, IHD, T2DM, Hyperlipidaemia, CVA, DCM, PPM, FHx_FDRwBAV, CMR_BIN, Echo_1_Date, Echo_2_Date, Echo_3_Date, SOV_1, SOV_2, SOV_3, Max_SOV, STJ_1, STJ_2, STJ_3, Max_STJ, AA_1, AA_2, AA_3, Max_AA, LVEDD_1, LVEDD_2, LVEDD_3, LVESD_1, LVESD_2, LVESD_3, LV_Septum_1, LV_Septum_2, LV_Septum_3, LVEF_1, LVEF_2, LVEF_3, AR_Severity_1, AR_Severity_2, AR_Severity_3, AS_Severity_1, AS_Severity_2, AS_Severity_3, AV_Peak_Velocity_1, AV_Peak_Velocity_2, AV_Peak_Velocity_3, AV_Mean_Velocity_1, AV_Mean_Velocity_2, AV_Mean_Velocity_3, LVOT_Peak_Velocity_1, LVOT_Peak_Velocity_2, LVOT_Peak_Velocity_3, LVOT_Mean_Velocity_1, LVOT_Mean_Velocity_2, LVOT_Mean_Velocity_3, LVOT_Diameter_1, LVOT_Diameter_2, LVOT_Diameter_3, Average_Met_Min_Week, Elite_Athlete, Exercise_Group, Exercise_Group_Seden_BIN, Mortality, Date_Death, Mortality_FU_Time, AVR_BIN, AVR_Date, AVR_FU_Time, Surgery_AVR, AVR_Indication, Severe_AS, Severe_AS_FU_Time, Severe_AR, Severe_AR_FU_Time, Severe_AoDilatation, Severe_AoDilatation_FU_Time, Composite_BIN_wMort, Composite_wMort_FU_Time, Composite_BIN_woMort, Composite_woMort_FU_Time)) %>%
+  modify_header(label = paste0("**",Outcomes[i],"**", " (Univariate)")) %>%
+  bold_p() %>%
+  as_gt()
+
+gtsave(UV_T[[i]], paste0("UV_Tables/" , Outcomes[i], "_UV.html"))
+
+}
+```
+
+```{r Preparing Outcomes for KM Curves}
+Combined_K <- Combined_C %>%
+  mutate(AVR_BIN = as.numeric(AVR_BIN),
+         Composite_BIN_wMort = as.numeric(Composite_BIN_wMort), 
+         Composite_BIN_woMort = as.numeric(Composite_BIN_woMort))
+
+Combined_KM <- Combined %>%
+  mutate(Mortality = as.numeric(Mortality),
+         CV_Mortality = as.numeric(CV_Mortality),
+         Severe_AS = as.numeric(Severe_AS),
+         Severe_AR = as.numeric(Severe_AR), 
+         Severe_AoDilatation = as.numeric(Severe_AoDilatation))
+```
+
+```{r Excercise Groups Bi/Tri Factor (Years)}
+fit1<- survfit(Surv(AVR_FU_Time, AVR_BIN) ~ Exercise_Group, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Time, Severe_AS) ~ Exercise_Group, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4),  legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Time, Severe_AR) ~ Exercise_Group, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Time, Severe_AoDilatation) ~ Exercise_Group, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Time, Composite_BIN_woMort) ~ Exercise_Group, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+cairo_pdf(filename = "CumHaz_Plots_Time/CumHazPlots.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot5)
+dev.off()
+
+fit1<- survfit(Surv(AVR_FU_Time, AVR_BIN) ~ Exercise_Group_Seden_BIN, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Time, Severe_AS) ~ Exercise_Group_Seden_BIN, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4),  legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Time, Severe_AR) ~ Exercise_Group_Seden_BIN, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Time, Severe_AoDilatation) ~ Exercise_Group_Seden_BIN, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Time, Composite_BIN_woMort) ~ Exercise_Group_Seden_BIN, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+cairo_pdf(filename = "CumHaz_Plots_Time/CumHazPlots_BIN.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot5)
+dev.off()
+```
+
+```{r Split by Gender (Years)}
+fit1<- survfit(Surv(AVR_FU_Time, AVR_BIN) ~ Gender, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Time, Severe_AS) ~ Gender, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4),  legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Time, Severe_AR) ~ Gender, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Time, Severe_AoDilatation) ~ Gender, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit7<- survfit(Surv(Mortality_FU_Time, Mortality) ~ Gender, data = Combined_KM)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit8<- survfit(Surv(Mortality_FU_Time, CV_Mortality) ~ Gender, data = Combined_KM)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Time, Composite_BIN_woMort) ~ Gender, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit6<- survfit(Surv(Composite_wMort_FU_Time, Composite_BIN_wMort) ~ Gender, data = Combined_K)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25)
+
+cairo_pdf(filename = "CumHaz_Plots_Time/CumHazPlots_BIN_Gender.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
+
+```{r Split by Ethnicity (Years)}
+fit1<- survfit(Surv(AVR_FU_Time, AVR_BIN) ~ Ethnicity, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Time, Severe_AS) ~ Ethnicity, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4),  legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Time, Severe_AR) ~ Ethnicity, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Time, Severe_AoDilatation) ~ Ethnicity, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit7<- survfit(Surv(Mortality_FU_Time, Mortality) ~ Ethnicity, data = Combined_KM)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit8<- survfit(Surv(Mortality_FU_Time, CV_Mortality) ~ Ethnicity, data = Combined_KM)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Time, Composite_BIN_woMort) ~ Ethnicity, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25)
+
+fit6<- survfit(Surv(Composite_wMort_FU_Time, Composite_BIN_wMort) ~ Ethnicity, data = Combined_K)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25)
+
+
+
+cairo_pdf(filename = "CumHaz_Plots_Time/CumHazPlots_BIN_Ethnicity.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
+
+```{r Split by BAV Morph (Years)}
+fit1<- survfit(Surv(AVR_FU_Time, AVR_BIN) ~ BAV_Morphology, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Time, Severe_AS) ~ BAV_Morphology, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4),  legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Time, Severe_AR) ~ BAV_Morphology, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Time, Severe_AoDilatation) ~ BAV_Morphology, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit7<- survfit(Surv(Mortality_FU_Time, Mortality) ~ BAV_Morphology, data = Combined_KM)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit8<- survfit(Surv(Mortality_FU_Time, CV_Mortality) ~ BAV_Morphology, data = Combined_KM)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Time, Composite_BIN_woMort) ~ BAV_Morphology, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25)
+
+fit6<- survfit(Surv(Composite_wMort_FU_Time, Composite_BIN_wMort) ~ BAV_Morphology, data = Combined_K)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+cairo_pdf(filename = "CumHaz_Plots_Time/CumHazPlots_BIN_BAV_Morph.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
+
+```{r Split by CoArctation (Years)}
+fit1<- survfit(Surv(AVR_FU_Time, AVR_BIN) ~ Coarctation, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("No", "Yes"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Time, Severe_AS) ~ Coarctation, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4),  legend.labs = c("No", "Yes"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Time, Severe_AR) ~ Coarctation, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("No", "Yes"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Time, Severe_AoDilatation) ~ Coarctation, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15),  legend.labs = c("No", "Yes"), xlab = "Years after First Echocardiogram", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit7<- survfit(Surv(Mortality_FU_Time, Mortality) ~ Coarctation, data = Combined_KM)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit8<- survfit(Surv(Mortality_FU_Time, CV_Mortality) ~ Coarctation, data = Combined_KM)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Time, Composite_BIN_woMort) ~ Coarctation, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("No", "Yes"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+fit6<- survfit(Surv(Composite_wMort_FU_Time, Composite_BIN_wMort) ~ Coarctation, data = Combined_K)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("No", "Yes"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", xscale="d_y",  break.time.by	= 365.25) 
+
+cairo_pdf(filename = "CumHaz_Plots_Time/CumHazPlots_BIN_CoArc.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
+
+```{r Excercise Groups Bi/Tri Factor (Age)}
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ Exercise_Group, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ Exercise_Group, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4),  xlim=c(16,max(Combined_KM$Severe_AS_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ Exercise_Group, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_KM$Severe_AR_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ Exercise_Group, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_KM$Severe_AoDilatation_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ Exercise_Group, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$Composite_woMort_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+
+cairo_pdf(filename = "CumHaz_Plots/CumHazPlots.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot5)
+dev.off()
+
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ Exercise_Group_Seden_BIN, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ Exercise_Group_Seden_BIN, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4), xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ Exercise_Group_Seden_BIN, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ Exercise_Group_Seden_BIN, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ Exercise_Group_Seden_BIN, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+cairo_pdf(filename = "CumHaz_Plots/CumHazPlots_BIN.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot5)
+dev.off()
+```
+
+```{r Split by Gender (Age)}
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ Gender, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ Gender, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4), xlim=c(16,max(Combined_KM$Severe_AS_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ Gender, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_KM$Severe_AR_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ Gender, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_KM$Severe_AoDilatation_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit7<- survfit(Surv(Mortality_FU_Age, Mortality) ~ Gender, data = Combined_KM)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_KM$Mortality_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit8<- survfit(Surv(Mortality_FU_Age, CV_Mortality) ~ Gender, data = Combined_KM)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_KM$Mortality_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ Gender, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$Composite_woMort_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit6<- survfit(Surv(Composite_wMort_FU_Age, Composite_BIN_wMort) ~ Gender, data = Combined_K)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$Composite_wMort_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10)
+
+cairo_pdf(filename = "CumHaz_Plots/CumHazPlots_BIN_Gender.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
+
+```{r Split by Ethnicity (Age)}
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ Ethnicity, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ Ethnicity, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4), xlim=c(16,max(Combined_KM$Severe_AS_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ Ethnicity, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_KM$Severe_AR_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ Ethnicity, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_KM$Severe_AoDilatation_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+fit7<- survfit(Surv(Mortality_FU_Age, Mortality) ~ Ethnicity, data = Combined_KM)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_KM$Mortality_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit8<- survfit(Surv(Mortality_FU_Age, CV_Mortality) ~ Ethnicity, data = Combined_KM)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_KM$Mortality_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ Ethnicity, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10)
+
+fit6<- survfit(Surv(Composite_wMort_FU_Age, Composite_BIN_wMort) ~ Ethnicity, data = Combined_K)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10)
+
+
+
+cairo_pdf(filename = "CumHaz_Plots/CumHazPlots_BIN_Ethnicity.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
+
+```{r Split by BAV Morph (Age)}
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ BAV_Morphology, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ BAV_Morphology, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4), xlim=c(16,max(Combined_KM$Severe_AS_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ BAV_Morphology, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_KM$Severe_AR_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ BAV_Morphology, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_KM$Severe_AoDilatation_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+fit7<- survfit(Surv(Mortality_FU_Age, Mortality) ~ BAV_Morphology, data = Combined_KM)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_KM$Mortality_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10)
+
+fit8<- survfit(Surv(Mortality_FU_Age, CV_Mortality) ~ BAV_Morphology, data = Combined_KM)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),xlim=c(16,max(Combined_KM$Mortality_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10)
+
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ BAV_Morphology, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$Composite_woMort_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10)
+
+fit6<- survfit(Surv(Composite_wMort_FU_Age, Composite_BIN_wMort) ~ BAV_Morphology, data = Combined_K)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$Composite_wMort_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+cairo_pdf(filename = "CumHaz_Plots/CumHazPlots_BIN_BAV_Morph.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
+
+```{r Split by CoArctation (Age)}
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ Coarctation, data = Combined_K)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$AVR_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ Coarctation, data = Combined_KM)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4), xlim=c(16,max(Combined_KM$Severe_AS_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ Coarctation, data = Combined_KM)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_KM$Severe_AR_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ Coarctation, data = Combined_KM)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_KM$Severe_AoDilatation_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit7<- survfit(Surv(Mortality_FU_Age, Mortality) ~ Coarctation, data = Combined_KM)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_KM$Mortality_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit8<- survfit(Surv(Mortality_FU_Age, CV_Mortality) ~ Coarctation, data = Combined_KM)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_KM$Mortality_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ Coarctation, data = Combined_K)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$Composite_woMort_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit6<- survfit(Surv(Composite_wMort_FU_Age, Composite_BIN_wMort) ~ Coarctation, data = Combined_K)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_K$Composite_wMort_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+cairo_pdf(filename = "CumHaz_Plots/CumHazPlots_BIN_CoArc.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
+
+```{r PS Combined_KM}
+set.seed(1234)
+library(MatchIt)
+
+Combined_PS <- Combined_KM %>%
+  select(ID, Exercise_Group_Seden_BIN, Echo_1_Age) %>%
+  drop_na()
+
+match.it <- matchit(Exercise_Group_Seden_BIN ~ Echo_1_Age, data = Combined_PS, method="optimal", ratio=1)
+a <- summary(match.it)
+
+#verify match 
+plot(match.it, type = 'jitter', interactive = T)
+
+plot(match.it, type = "density", interactive = T,
+     which.xs = ~Echo_1_Age)
+
+#create new dataframe without unmatched
+df.match1 <- match.data(match.it)[1:ncol(Combined_PS)]
+
+MatchNumbers <- df.match1$ID
+
+write_csv(df.match1, "Data/PS_Match1.csv")
+
+Combined_PS <- Combined_KM %>% filter(ID %in% MatchNumbers)
+                                      
+ggstatsplot::ggbetweenstats(Combined_KM, Gender, Echo_1_Age)                                      
+ggstatsplot::ggbetweenstats(Combined_PS, Gender, Echo_1_Age)
+  
+```
+
+```{r P Combined_KM}
+set.seed(1234)
+library(MatchIt)
+
+Combined_P <- Combined_K %>%
+  select(ID, Exercise_Group_Seden_BIN, Echo_1_Age) %>%
+  drop_na()
+
+match.it <- matchit(Exercise_Group_Seden_BIN ~ Echo_1_Age, data = Combined_P, method="optimal", ratio=1)
+a <- summary(match.it)
+
+#verify match 
+plot(match.it, type = 'jitter', interactive = T)
+
+plot(match.it, type = "density", interactive = T,
+     which.xs = ~Echo_1_Age)
+
+#create new dataframe without unmatched
+df.match1 <- match.data(match.it)[1:ncol(Combined_P)]
+
+MatchNumbers <- df.match1$ID
+
+write_csv(df.match1, "Data/P_Match1.csv")
+
+Combined_P <- Combined_K %>% filter(ID %in% MatchNumbers)
+  
+```
+
+```{r Excercise Groups Bi/Tri Factor}
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ Exercise_Group, data = Combined_P)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$AVR_FU_Age)),legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ Exercise_Group, data = Combined_PS)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4), xlim=c(16,max(Combined_PS$Severe_AS_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ Exercise_Group, data = Combined_PS)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AR_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ Exercise_Group, data = Combined_PS)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AoDilatation_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ Exercise_Group, data = Combined_P)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$Composite_woMort_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately Active", "Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8", "#004231"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+cairo_pdf(filename = "PS_CumHaz_Plots/CumHazPlots.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot5)
+dev.off()
+
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ Exercise_Group_Seden_BIN, data = Combined_P)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$AVR_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ Exercise_Group_Seden_BIN, data = Combined_PS)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4), xlim=c(16,max(Combined_PS$Severe_AS_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ Exercise_Group_Seden_BIN, data = Combined_PS)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AR_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ Exercise_Group_Seden_BIN, data = Combined_PS)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AoDilatation_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ Exercise_Group_Seden_BIN, data = Combined_P)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$Composite_woMort_FU_Age)), legend.labs = c("Sedentary/Lightly Active", "Moderately/Highly Active"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+cairo_pdf(filename = "PS_CumHaz_Plots/CumHazPlots_BIN.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot5)
+dev.off()
+```
+
+```{r Split by Gender}
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ Gender, data = Combined_P)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$AVR_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ Gender, data = Combined_PS)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4), xlim=c(16,max(Combined_PS$Severe_AS_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ Gender, data = Combined_PS)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AR_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ Gender, data = Combined_PS)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AoDilatation_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit7<- survfit(Surv(Mortality_FU_Age, Mortality) ~ Gender, data = Combined_PS)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_PS$Mortality_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit8<- survfit(Surv(Mortality_FU_Age, CV_Mortality) ~ Gender, data = Combined_PS)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_PS$Mortality_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ Gender, data = Combined_P)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$Composite_woMort_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit6<- survfit(Surv(Composite_wMort_FU_Age, Composite_BIN_wMort) ~ Gender, data = Combined_P)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$Composite_wMort_FU_Age)), legend.labs = c("Male", "Female"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10)
+
+cairo_pdf(filename = "PS_CumHaz_Plots/CumHazPlots_BIN_Gender.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
+
+```{r Split by Ethnicity}
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ Ethnicity, data = Combined_P)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$AVR_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ Ethnicity, data = Combined_PS)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4), xlim=c(16,max(Combined_PS$Severe_AS_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ Ethnicity, data = Combined_PS)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AR_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ Ethnicity, data = Combined_PS)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AoDilatation_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+fit7<- survfit(Surv(Mortality_FU_Age, Mortality) ~ Ethnicity, data = Combined_PS)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1),  legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit8<- survfit(Surv(Mortality_FU_Age, CV_Mortality) ~ Ethnicity, data = Combined_PS)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_PS$Mortality_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10)
+
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ Ethnicity, data = Combined_P)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$Composite_woMort_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10)
+
+fit6<- survfit(Surv(Composite_wMort_FU_Age, Composite_BIN_wMort) ~ Ethnicity, data = Combined_P)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$Composite_wMort_FU_Age)), legend.labs = c("White", "Asian", "Black", "Other"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10)
+
+
+
+cairo_pdf(filename = "PS_CumHaz_Plots/CumHazPlots_BIN_Ethnicity.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
+
+```{r Split by BAV Morph}
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ BAV_Morphology, data = Combined_P)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$AVR_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ BAV_Morphology, data = Combined_PS)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4), xlim=c(16,max(Combined_PS$Severe_AS_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ BAV_Morphology, data = Combined_PS)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AR_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ BAV_Morphology, data = Combined_PS)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AoDilatation_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+fit7<- survfit(Surv(Mortality_FU_Age, Mortality) ~ BAV_Morphology, data = Combined_PS)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_PS$Mortality_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit8<- survfit(Surv(Mortality_FU_Age, CV_Mortality) ~ BAV_Morphology, data = Combined_PS)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_PS$Mortality_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10)
+
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ BAV_Morphology, data = Combined_P)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$Composite_woMort_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10)
+
+fit6<- survfit(Surv(Composite_wMort_FU_Age, Composite_BIN_wMort) ~ BAV_Morphology, data = Combined_P)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$Composite_wMort_FU_Age)), legend.labs = c("RL", "RN", "LN", "Type 0"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8", "#06D6A0", "#002A32"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+cairo_pdf(filename = "PS_CumHaz_Plots/CumHazPlots_BIN_BAV_Morph.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
+
+```{r Split by CoArctation}
+fit1<- survfit(Surv(AVR_FU_Age, AVR_BIN) ~ Coarctation, data = Combined_P)
+plot1 <- ggsurvplot(fit1, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$AVR_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Having AVR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit2<- survfit(Surv(Severe_AS_FU_Age, Severe_AS) ~ Coarctation, data = Combined_PS)
+plot2 <- ggsurvplot(fit2, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.4), xlim=c(16,max(Combined_PS$Severe_AS_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AS", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.35), legend.title = "", break.time.by = 10) 
+
+fit3<- survfit(Surv(Severe_AR_FU_Age, Severe_AR) ~ Coarctation, data = Combined_PS)
+plot3 <- ggsurvplot(fit3, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AR_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AR", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit4<- survfit(Surv(Severe_AoDilatation_FU_Age, Severe_AoDilatation) ~ Coarctation, data = Combined_PS)
+plot4 <- ggsurvplot(fit4, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,.15), xlim=c(16,max(Combined_PS$Severe_AoDilatation_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Having Severe AoDilatation", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit7<- survfit(Surv(Mortality_FU_Age, Mortality) ~ Coarctation, data = Combined_PS)
+plot7 <- ggsurvplot(fit7, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_PS$Mortality_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring All-Cause Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10) 
+
+fit8<- survfit(Surv(Mortality_FU_Age, CV_Mortality) ~ Coarctation, data = Combined_PS)
+plot8 <- ggsurvplot(fit8, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_PS$Mortality_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Years after First Echocardiogram", ylab = "Probability of Incurring Cardiovascular Mortality", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.1), legend.title = "", break.time.by = 10)
+
+fit5<- survfit(Surv(Composite_woMort_FU_Age, Composite_BIN_woMort) ~ Coarctation, data = Combined_P)
+plot5 <- ggsurvplot(fit5, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$Composite_woMort_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+fit6<- survfit(Surv(Composite_wMort_FU_Age, Composite_BIN_wMort) ~ Coarctation, data = Combined_P)
+plot6 <- ggsurvplot(fit6, fun = "cumhaz", pval = TRUE, conf.int = TRUE,
+           risk.table = T, risk.table.y.text.col = TRUE, ylim=c(0,1), xlim=c(16,max(Combined_P$Composite_wMort_FU_Age)), legend.labs = c("No", "Yes"), xlab = "Age at Outcome", ylab = "Probability of Incurring Composite Endpoint (wMort)", palette = c("#fba30c", "#0077b8"), theme = "lancet", pval.coord = c(16,0.75), legend.title = "", break.time.by = 10) 
+
+cairo_pdf(filename = "PS_CumHaz_Plots/CumHazPlots_BIN_CoArc.pdf",
+         width = 10, height = 7, onefile = T)
+print(plot1, newpage = 0)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot7)
+print(plot8)
+print(plot5)
+print(plot6)
+dev.off()
+```
